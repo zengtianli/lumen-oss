@@ -1,0 +1,1 @@
+{"app":"Lumen","bundle_id":"cyou.tianli.Lumen","keys":[{"key":"cmd+s","action":"保存当前知识页面"},{"key":"cmd+o","action":"导入HTML知识成果"},{"key":"cmd+shift+f","action":"搜索知识库"},{"key":"cmd+n","action":"生成新知识成果"}]}

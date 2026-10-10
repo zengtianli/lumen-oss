@@ -1,0 +1,12 @@
+{
+  "title": "纸星计划（虚构示例）",
+  "subtitle": "用一份小成果练习阅读与编辑",
+  "home": "overview",
+  "pages": [{
+    "id": "overview", "title": "计划如何工作",
+    "blocks": [
+      {"id": "purpose", "type": "prose", "title": "用途", "text": "纸星计划是虚构的折纸学习活动，不涉及真实人员、组织或业务。"},
+      {"id": "steps", "type": "steps", "title": "步骤", "items": ["准备一张彩纸", "折出一颗纸星", "记录自己的改进"]}
+    ]
+  }]
+}

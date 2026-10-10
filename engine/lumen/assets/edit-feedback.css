@@ -1,0 +1,16 @@
+#html-feedback-ui{font:14px/1.5 -apple-system,"PingFang SC",sans-serif;color:#172033;text-align:left;position:relative;z-index:2147480000}
+#html-feedback-ui *{box-sizing:border-box}
+#html-feedback-ui .hf-bar{position:fixed;bottom:12px;right:12px;left:12px;margin:auto;max-width:1040px;padding:10px;background:#fff;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 3px 18px #17203322;display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+#html-feedback-ui button,#html-feedback-ui select{font:inherit;color:#172033;background:#f8fafc;border:1px solid #cbd5e1;border-radius:6px;padding:6px 10px;cursor:pointer}
+#html-feedback-ui button:hover{background:#e8eef7}
+#html-feedback-ui .hf-saved{font-size:12px;color:#526078}
+#html-feedback-ui .hf-panel{position:fixed;right:12px;top:12px;bottom:86px;width:min(420px,calc(100vw - 24px));overflow:auto;background:#fff;padding:16px;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 4px 24px #17203322}
+#html-feedback-ui [hidden]{display:none!important}
+#html-feedback-ui h2{font-size:18px;margin:0 0 10px}
+#html-feedback-ui .hf-card{border-top:1px solid #dbe1ea;padding:12px 0;display:flex;flex-direction:column;gap:8px}
+#html-feedback-ui textarea{font:inherit;width:100%;min-height:70px;border:1px solid #cbd5e1;border-radius:5px;background:#fff;color:#172033;padding:8px}
+#html-feedback-ui blockquote{margin:0;padding:8px;background:#f1f5f9;font-size:12px;overflow-wrap:anywhere;max-height:100px;overflow:auto}
+[data-feedback-block].hf-active{outline:2px solid #4772bc;outline-offset:3px}
+[data-feedback-block][contenteditable="true"]{outline:1px dashed #96accd;outline-offset:3px;cursor:text}
+@media print{#html-feedback-ui{display:none!important}[data-feedback-block]{outline:none!important}}
+
