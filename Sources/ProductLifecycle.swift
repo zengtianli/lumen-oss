@@ -3,20 +3,24 @@ import AppKit
 @MainActor enum ProductLifecycle {
     static var settings: ProductSettings?
     static var activeConfiguration: AppConfiguration?
+    static var shortcuts: AppShortcuts?
     static let updateSource: AppUpdateSource = .github(repository: "zengtianli/lumen-oss")
     static func configuration() -> AppConfiguration {
         AppConfiguration(productID: LumenPaths.bundleID,
-                         defaultsKeys: ["library.sidebar", "library.project", "library.tag", "reading.inspector"],
+                         defaultsKeys: ["library.sidebar", "library.project", "library.tag", "reading.inspector", "appUpdateOptions"] + AppShortcuts.portableKeys,
                          files: [AppConfigurationFile(url: LumenPaths.stateDirectory.appendingPathComponent("settings.json"), keys: ["default_kind", "theme", "content_width", "font_size", "restore_reading", "labels", "generation"])],
                          defaults: LumenPaths.defaults)
     }
     static func product() -> AppLifecycleCLI.Product {
         AppLifecycleCLI.Product(command: "lumen", name: LumenPaths.displayName, configuration: configuration(), updateSource: updateSource)
     }
-    static func install(_ engine: EngineClient) {
+    static func install(_ engine: EngineClient, refresh: @escaping () -> Void) {
+        let shortcuts = AppShortcuts(defaults: LumenPaths.defaults, action: refresh)
+        shortcuts.installMenu(); shortcuts.menuItem?.title = "刷新知识库"
+        self.shortcuts = shortcuts
         let config = configuration()
         activeConfiguration = config
-        let settings = ProductSettings(engine: engine); self.settings = settings
+        let settings = ProductSettings(engine: engine, shortcuts: shortcuts); self.settings = settings
         AppLifecycleUI.install(name: LumenPaths.displayName, configuration: config, updateSource: updateSource)
         AppLifecycleCLI.follow(config)
         AppLifecycleUI.shared.willShow = { settings.refresh() }

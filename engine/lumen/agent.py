@@ -295,6 +295,9 @@ def make_prompt(task, snapshot):
         payload["current_content"] = task["current_content"]
         payload["feedback"] = task.get("feedback", {})
         payload["notes"] = task.get("notes", "")
+    if task["params"].get("operation")=="ask":
+        system += " 本次是对指定保存版资料的阅读问答，返回可预览的答案内容；不能改写原文或声称已保存。按问题回答并标明章节依据。图像和交互内容未提取时不得推断其数值或结论。"
+        payload["reading_scope"]={"document_id":task["params"]["source_document_id"],"version":task["params"]["source_version"],"scope":task["params"]["read_scope"],"coverage":task["params"]["read_coverage"]}
     return system, json.dumps(payload, ensure_ascii=False)
 
 

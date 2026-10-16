@@ -48,9 +48,44 @@ def parser():
         listing.add_argument("--" + flag)
     listing.add_argument("--favorite", action="store_true", default=None)
     listing.add_argument("--archived", action="store_true", default=None)
+    listing.add_argument("--trashed", action="store_true", default=None)
+    listing.add_argument("--sort", choices=["updated","created","title","deleted","recent"],default="updated")
+    listing.add_argument("--ascending",dest="descending",action="store_false")
     get = add("get", "读取成果、章节、内容源和意见")
     get.add_argument("document_id")
     get.add_argument("--version", type=int, help="读取指定历史版本")
+    paths=add("paths","读取当前 HTML、文档入口、资源目录和来源位置")
+    paths.add_argument("document_id"); paths.add_argument("--page-id","--page",dest="page_id"); paths.add_argument("--version",type=int)
+    for command in ("read","export-text","prepare-ai"):
+        reading=add(command,{"read":"读取完整正文及页范围，不调用模型","export-text":"导出 Markdown/TXT 正文","prepare-ai":"准备本机 Agent、正文或跨设备阅读附件"}[command])
+        reading.add_argument("document_id"); reading.add_argument("--page-id","--page",dest="page_id"); reading.add_argument("--version",type=int)
+        reading.add_argument("--scope",choices=["page","document","selection"],default="document" if command=="export-text" else "page")
+        reading.add_argument("--format",choices=["markdown","text","json"],default="markdown")
+        reading.add_argument("--selection"); reading.add_argument("--include-notes",action="store_true"); reading.add_argument("--include-feedback",action="store_true")
+        reading.add_argument("--rendered-html",help="当前页渲染视图快照文件；显式标注 rendered_view")
+        reading.add_argument("--max-chars",type=int,help="显式限制；返回截断状态，省略则完整读取")
+        if command=="export-text": reading.add_argument("--output",required=True)
+        if command=="prepare-ai":
+            reading.add_argument("--mode",choices=["local","text","attachment"],default="local"); reading.add_argument("--output"); reading.add_argument("--request")
+    for command in ("rename","trash","untrash","purge","rename-file","relink-source"):
+        managing=add(command,{"rename":"直接重命名文档","trash":"移到废纸篓，原件保留","untrash":"恢复废纸篓文档","purge":"明确确认后彻底删除托管文档","rename-file":"更改包内 HTML 文件名并创建新版本","relink-source":"重新关联已移动的原始来源"}[command])
+        managing.add_argument("document_id"); managing.add_argument("--expected-version",type=int,required=command=="rename-file"); managing.add_argument("--expected-metadata-revision",type=int)
+        if command=="rename": managing.add_argument("--title",required=True); managing.add_argument("--sync-content-title",action="store_true")
+        if command=="purge": managing.add_argument("--confirmed",action="store_true",help="不可恢复；仅针对废纸篓托管文档")
+        if command=="rename-file": managing.add_argument("--page-id",required=True); managing.add_argument("--filename",required=True)
+        if command=="relink-source": managing.add_argument("--source",required=True)
+    copied=add("duplicate","复制为新文档，原文档保留")
+    copied.add_argument("document_id"); copied.add_argument("--title"); copied.add_argument("--include-notes",action="store_true"); copied.add_argument("--include-feedback",action="store_true"); copied.add_argument("--include-history",action="store_true")
+    batched=add("batch","逐项批量操作并返回成功与失败")
+    batched.add_argument("--document-ids",nargs="+",required=True); batched.add_argument("--action",choices=["trash","untrash","metadata"],required=True); batched.add_argument("--values")
+    find_source=add("find-source","查询同一原始来源的已有文档，含归档和废纸篓")
+    find_source.add_argument("path")
+    ask=add("ask","对保存版当前页或整份文档提问，后台任务与结果预览")
+    ask.add_argument("document_id"); ask.add_argument("--request",required=True); ask.add_argument("--page-id"); ask.add_argument("--version",type=int)
+    ask.add_argument("--scope",choices=["page","document","selection"],default="page"); ask.add_argument("--selection")
+    ask.add_argument("--provider",choices=["codex","claude"]); ask.add_argument("--timeout-seconds",type=float); ask.add_argument("--idempotency-key")
+    ask.add_argument("--include-notes",action="store_true"); ask.add_argument("--include-feedback",action="store_true")
+    ask.add_argument("--rendered-html",help="当前页渲染快照文件")
     build = add("build", "将已有标准 JSON 构建入库，不二次调用模型")
     build.add_argument("--content", required=True, help="JSON 文件或 JSON 对象")
     build.add_argument("--kind", choices=["portal", "report", "teach"], default="portal")
@@ -59,6 +94,9 @@ def parser():
     imp.add_argument("--title")
     imp.add_argument("--kind", choices=["portal", "report", "teach"])
     imp.add_argument("--include-test", action="store_true")
+    imp.add_argument("--on-duplicate",choices=["existing","update","copy"],default="existing")
+    imp.add_argument("--expected-version",type=int,help="更新已有文档时必须提供读取版本")
+    imp.add_argument("--document-id",help="明确将编辑副本更新到这份文档，需 on-duplicate=update")
     convert = add("convert", "用现有转换底座将目录图谱或 PPT 建成可编辑 HTML")
     convert.add_argument("--kind", required=True, choices=["graph", "ppt"])
     convert.add_argument("--source", required=True)
@@ -115,6 +153,10 @@ def parser():
     export.add_argument("document_id")
     export.add_argument("--output", required=True)
     export.add_argument("--version", type=int)
+    for name in ("export-page","export-folder"):
+        exported=add(name,"独立单页 HTML（资源内联）" if name=="export-page" else "完整离线目录与资源")
+        exported.add_argument("document_id"); exported.add_argument("--output",required=True); exported.add_argument("--version",type=int)
+        if name=="export-page": exported.add_argument("--page-id")
     search = add("search", "搜索具体章节和内容")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=20)
@@ -156,6 +198,8 @@ def _output(envelope, as_json):
         print(json.dumps(envelope, ensure_ascii=False))
     elif not envelope["ok"]:
         print(envelope["error"]["message"], file=sys.stderr)
+    elif (envelope["action"] == "read" or envelope["action"] == "prepare-ai" and "copy_text" in envelope["result"]) and envelope["result"].get("format")!="json":
+        print(envelope["result"].get("copy_text",envelope["result"].get("text","")),end="\n")
     else:
         print(json.dumps(envelope["result"], ensure_ascii=False, indent=2))
 
@@ -220,6 +264,8 @@ def main(argv=None):
                         params[key] = _json_value(params[key])
                 if "html" in params:
                     params["html"] = Path(params["html"]).expanduser().read_text(encoding="utf-8")
+                if "rendered_html" in params:
+                    params["rendered_html"] = Path(params["rendered_html"]).expanduser().read_text(encoding="utf-8")
             envelope = dispatch(action, params, state_dir)
             if args.command == "generate" and args.wait and envelope["ok"]:
                 task = envelope["result"]["task"]

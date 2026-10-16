@@ -17,6 +17,28 @@ lumen rpc get --params '{"document_id":"doc-编号"}' --json
 
 `get` 指定历史版本时，正文、页面、反馈和正文 `version` 取历史版本；成果标题、个人笔记、分类、收藏等全局属性和 `metadata_revision` 取当前值。历史内容源的标题仍保留在 `content.title`，不会将旧个人属性与当前修订号混在一起。
 
+## 管理与给 AI 阅读
+
+```sh
+lumen paths DOCUMENT_ID --page-id PAGE_ID --json
+lumen rename DOCUMENT_ID --title '新标题'
+lumen trash DOCUMENT_ID
+lumen list --trashed --json
+lumen untrash DOCUMENT_ID
+lumen read DOCUMENT_ID --scope document --format markdown
+lumen prepare-ai DOCUMENT_ID --scope document
+lumen prepare-ai DOCUMENT_ID --scope document --mode attachment --output 阅读包.zip --json
+lumen ask DOCUMENT_ID --scope document --request '概括主要结论，并引用依据章节' --json
+```
+
+`paths/read/prepare-ai` 可用 `--version` 读取历史；正文默认当前页，整份要 `--scope document`。普通导入 HTML 也能读正文，不依赖 content.json。JSON 回执里的 `coverage` 表示实际页数、缺失、截断和图片遗漏。整份缺页或显式截断时，导出全文与准备 AI 材料会停止；超过模型预算时按章节提问。复制操作由 GUI 用户按钮执行，接口只返回材料。
+
+`export-text --output 正文.md`、`export-page --output 单页.html`、`export-folder --output 完整目录` 拒绝覆盖；跨页或动态页面需要完整 ZIP/目录。`rename-file --page-id PAGE_ID --filename 新文件.html --expected-version N` 改托管包文件名，保留旧版及跳转。`relink-source --source PATH` 修复来源，`duplicate` 创建新 ID。重复导入默认打开已有，明确更新时用 `import PATH --on-duplicate update --expected-version N`；外部编辑副本加 `--document-id DOCUMENT_ID`。
+
+`ask` 的 task 回执与 `generate` 相同，但成功结果为答案预览，原文版本不改变。任务窗口可重开预览、取消与接续。GUI 另存答案创建新文档；追加答案需用户确认且以阅读时版本为基线。
+
+管理动作支持版本与属性修订条件。废纸篓支持恢复；`purge --confirmed` 只彻底删除已在废纸篓的托管内容和历史，不动原始来源。`batch` 使用 RPC/schema 指定动作和文档 ID，返回逐项结果，部分失败仍有明确失败清单。
+
 ## 按需本机 API
 
 `lumen serve --port 0` 启动一个显式本机服务，ready回执给实际地址和令牌。客户端用 `Authorization: Bearer <token>`，经 `POST /api/rpc` 发送 `{action,params}`；`GET /api/status`、schema和文档读取按同一鉴权要求。远程监听、任意网页跨源请求和未鉴权写入均拒绝。退出服务不影响已独立运行的生成任务。

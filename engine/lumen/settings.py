@@ -8,7 +8,8 @@ from .types import LumenError
 DEFAULTS = {
     "default_kind": "portal", "theme": "light", "content_width": "full",
     "font_size": 17, "restore_reading": True,
-    "labels": {"portal": "门户", "report": "阅读与报告", "teach": "教学", "library": "知识库", "generate": "生成", "import": "导入", "search": "搜索", "save": "保存", "favorite": "收藏", "notes": "个人笔记", "versions": "版本"},
+    "labels": {"portal": "门户", "report": "阅读与报告", "teach": "教学", "library": "知识库", "generate": "生成", "import": "导入", "search": "搜索", "save": "保存", "favorite": "收藏", "notes": "个人笔记", "versions": "版本",
+               "rename":"重命名…","trash":"移到废纸篓","untrash":"恢复文档","purge":"彻底删除…","copy_ai":"复制给 AI","more":"更多","information":"文档信息","paths":"文件位置","duplicate":"复制文档…","relink_source":"重新关联来源…","rename_file":"更改 HTML 文件名…","open_browser":"在浏览器中打开","export_text":"导出正文…","sort":"排序","ask":"让 AI 阅读…"},
     "generation": {"timeout_seconds": 600, "max_source_bytes": 240000},
 }
 GENERATION_LIMITS = {"timeout_seconds": (10, 3600), "max_source_bytes": (1, 400_000)}

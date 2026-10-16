@@ -14,7 +14,7 @@ import WebKit
         if words.first == "--version" { print(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"); return }
         let demoPath = words.first == "capture-demo" && words.count == 3 && words[1] == "--output" ? words[2] : nil
         if words.first == "capture-demo" && (demoPath == nil || demoPath?.isEmpty == true) { fputs("capture-demo --output <目录>\n", stderr); exit(64) }
-        let testing = words.contains("--ui-self-test") || words.contains("--snapshot") || demoPath != nil
+        let testing = words.contains("--product-basics-self-test") || words.contains("--ui-self-test") || words.contains("--management-self-test") || words.contains("--snapshot") || demoPath != nil
         let probePath = words.first == "--lifecycle-follow-probe" && words.count == 2 ? words[1] : nil
         let background = words.contains("--background") || words.contains("-lane_quiet") || probePath != nil
         if let probePath {
@@ -52,12 +52,14 @@ import WebKit
         buildMenus()
         let controller = LibraryWindowController(engine: EngineClient()); self.controller = controller
         LaneSignal.applyWindowFrame()
-        ProductLifecycle.install(controller.engine)
+        ProductLifecycle.install(controller.engine, refresh: { [weak self] in self?.refreshLibrary() })
         ProductLifecycle.settings?.changed = { Task { await controller.refresh(); await controller.applyReadingSettings() } }
         if let demoPath {
             Task { await NativeDemo.run(controller, output: URL(fileURLWithPath: demoPath, isDirectory: true)) }
         } else if let probePath {
             NativeLifecycleProbe.start(path: probePath)
+        } else if CommandLine.arguments.contains("--product-basics-self-test") {
+            Task { await NativeProductBasicsTest.run(controller) }
         } else if testing {
             Task { await NativeSelfTest.run(controller) }
         } else {
@@ -99,13 +101,19 @@ import WebKit
         file.addItem(item("生成知识…", #selector(generate), "n", target: self)); file.addItem(item("导入 HTML / PPTX…", #selector(importHTML), "o", target: self))
         file.addItem(item("生成目录图谱…", #selector(graph), target: self))
         file.addItem(item("保存页面", #selector(save), "s", target: self)); file.addItem(.separator())
-        file.addItem(item("导出成果…", #selector(exportDocument), "e", target: self)); file.addItem(item("关闭窗口", #selector(NSWindow.performClose(_:)), "w"))
+        file.addItem(item("导出成果…", #selector(exportDocument), "e", target: self))
+        file.addItem(item(T("mac.label.rename","重命名…"), #selector(renameDocument), target:self))
+        file.addItem(item(T("mac.label.duplicate","复制文档…"), #selector(duplicateDocument), target:self))
+        file.addItem(item(T("mac.label.copy_ai","复制给 AI"), #selector(copyAI), target:self))
+        file.addItem(item(T("mac.label.trash","移到废纸篓"), #selector(trashDocument), target:self))
+        file.addItem(.separator()); file.addItem(item("关闭窗口", #selector(NSWindow.performClose(_:)), "w"))
         let edit = NSMenu(title: "编辑"), editItem = NSMenuItem(title: "编辑", action: nil, keyEquivalent: ""); editItem.submenu = edit; main.addItem(editItem)
         edit.addItem(item("撤销", Selector(("undo:")), "z")); let redo = item("重做", Selector(("redo:")), "z"); redo.keyEquivalentModifierMask = [.command, .shift]; edit.addItem(redo)
         edit.addItem(.separator()); edit.addItem(item("剪切", #selector(NSText.cut(_:)), "x")); edit.addItem(item("复制", #selector(NSText.copy(_:)), "c")); edit.addItem(item("粘贴", #selector(NSText.paste(_:)), "v")); edit.addItem(item("全选", #selector(NSText.selectAll(_:)), "a"))
         let view = NSMenu(title: "显示"), viewItem = NSMenuItem(title: "显示", action: nil, keyEquivalent: ""); viewItem.submenu = view; main.addItem(viewItem)
-        view.addItem(item("搜索知识", #selector(search), "f", target: self)); view.addItem(item("刷新知识库", #selector(refreshLibrary), "r", target: self))
-        view.addItem(item("笔记与版本", #selector(inspector), "i", target: self)); view.addItem(item("返回上一页", #selector(back), "[", target: self))
+        view.addItem(item("搜索知识", #selector(search), "f", target: self))
+        view.addItem(item(T("mac.label.information","文档信息"), #selector(information), "i", target:self))
+        view.addItem(item("笔记与版本", #selector(inspector), target: self)); view.addItem(item("返回上一页", #selector(back), "[", target: self))
         view.addItem(item("生成任务", #selector(tasks), target: self))
         let help = NSMenu(title: "帮助"), helpItem = NSMenuItem(title: "帮助", action: nil, keyEquivalent: ""); helpItem.submenu = help; main.addItem(helpItem)
         help.addItem(item("生成标准", #selector(guide), target: self)); help.addItem(item("发现已有 HTML…", #selector(discover), target: self))
@@ -121,6 +129,15 @@ import WebKit
     @objc func guide() { controller?.showGuide() }
     @objc func save() { controller?.savePage() }
     @objc func exportDocument() { controller?.exportSelected() }
+    @objc func renameDocument() { controller?.renameDocument(nil) }
+    @objc func duplicateDocument() { controller?.duplicateDocument(nil) }
+    @objc func copyAI() { controller?.copyCurrentForAI() }
+    @objc func information() { controller?.showDocumentInformation() }
+    @objc func trashDocument() { controller?.trashDocuments(nil) }
+    func refreshDocumentMenuLabels() {
+        let labels: [Selector:(String,String)] = [#selector(renameDocument):("rename","重命名…"),#selector(duplicateDocument):("duplicate","复制文档…"),#selector(copyAI):("copy_ai","复制给 AI"),#selector(trashDocument):("trash","移到废纸篓"),#selector(information):("information","文档信息")]
+        for top in NSApp.mainMenu?.items ?? [] { for item in top.submenu?.items ?? [] { if let action = item.action, let (key,fallback) = labels[action] { item.title = T("mac.label."+key,fallback) } } }
+    }
     @objc func search() { controller?.focusSearch() }
     @objc func inspector() { controller?.toggleInspector() }
     @objc func tasks() { controller?.showTasks() }

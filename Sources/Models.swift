@@ -10,6 +10,8 @@ struct KnowledgeDocument: Equatable {
     var tags: [String]
     var favorite: Bool
     var archived: Bool
+    var trashed: Bool
+    var deletedAt: String?
     var version: Int
     var metadataRevision: Int
     var entryPath: String
@@ -22,6 +24,7 @@ struct KnowledgeDocument: Equatable {
         self.id = id; self.title = title; kind = value["kind"] as? String ?? "report"
         project = value["project"] as? String ?? ""; tags = value["tags"] as? [String] ?? []
         favorite = value["favorite"] as? Bool ?? false; archived = value["archived"] as? Bool ?? false
+        trashed = value["trashed"] as? Bool ?? false; deletedAt = value["deleted_at"] as? String
         version = value["version"] as? Int ?? 1; metadataRevision = value["metadata_revision"] as? Int ?? 0
         entryPath = value["entry_path"] as? String ?? ""
         notes = value["notes"] as? String ?? ""; updatedAt = value["updated_at"] as? String ?? ""

@@ -52,6 +52,9 @@ import AppKit
         cancelButton.isEnabled = ["queued", "running"].contains(state)
         resumeButton.isEnabled = task["can_resume"] as? Bool == true
         openButton.isEnabled = state == "succeeded" && task["document_id"] is String
+        if (task["params"] as? JSON)?["operation"] as? String == "ask" {
+            openButton.title = "查看 AI 回答"; openButton.isEnabled = state == "succeeded" && task["result"] is JSON
+        } else { openButton.title = "打开生成成果" }
         detail.stringValue = (task["error"] as? JSON)?["message"] as? String ?? (task["message"] as? String ?? "选择任务查看状态、打开成果或接续。")
     }
     func refresh() async {
@@ -72,6 +75,7 @@ import AppKit
         Task { do { _ = try await library.engine.call(action, ["task_id": id]); await refresh(); await library.resumeTaskObservation() } catch { status.stringValue = error.localizedDescription } }
     }
     @objc func openResult() {
+        if let task = selected, (task["params"] as? JSON)?["operation"] as? String == "ask" { library?.showAIResult(task:task); return }
         guard let id = selected?["document_id"] as? String, let library else { return }
         Task { await library.open(documentID: id); library.showWindow(nil); library.window?.makeKeyAndOrderFront(nil) }
     }

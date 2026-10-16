@@ -15,10 +15,10 @@ def tool_specs():
         "status": ("读取本机知识库、生成任务、版本和设置状态。", {}, []),
         "guide": ("读取Lumen内置标准工作流，agent无需读取任何skill。无topic时列出主题；按主题取正文再通过同源接口执行。", {"topic": string}, []),
         "discover": ("复用现有成果索引，在指定根目录发现重要HTML入口。只读候选，不自动导入、生成或发布；默认排除测试SVG。", {"roots": {"type": "array", "items": string}, "limit": integer}, []),
-        "list": ("查找成果，按项目、类型、标签、收藏或归档筛选。", {"query": string, "project": string, "kind": string, "tag": string, "favorite": boolean, "archived": boolean}, []),
+        "list": ("查找成果，按项目、类型、标签、收藏、归档或废纸篓筛选；支持排序。", {"query": string, "project": string, "kind": string, "tag": string, "favorite": boolean, "archived": boolean,"trashed":boolean,"sort":{"enum":["updated","created","title","deleted","recent"]},"descending":boolean}, []),
         "get": ("读取成果全文结构、章节路径、版本、批注和笔记；更新前先读取。不提供version读取当前版。", {"document_id": string, "version": integer}, ["document_id"]),
         "build": ("将已经整理的标准内容生成可编辑 HTML 并入库，不调用模型。content={title,home,pages:[{id,title,summary,blocks:[{id,type:'prose',text}]}]}。portal逐层解释；report可单页；teach用于教学。更新旧文档必须 document_id+expected_version；冲突拒绝覆盖。", {**common, "content": {"type": "object"}, "kind": {"enum": ["portal", "report", "teach"]}, "project": string, "tags": {"type": "array", "items": string}, "sources": {"type": "array"}, "idempotency_key": string}, ["content"]),
-        "import": ("导入本机 HTML 或 portal 入口，收齐依赖并提供编辑和版本。默认排除测试SVG。", {"path": string, "kind": string, "project": string, "tags": {"type": "array", "items": string}, "title": string, "include_test": boolean}, ["path"]),
+        "import": ("导入本机 HTML 或 portal 入口，收齐依赖并提供编辑和版本。默认排除测试SVG。重复来源默认打开已有，可明确 update（需 expected_version）或 copy；编辑副本更新提供 document_id。", {"path": string, "kind": string, "project": string, "tags": {"type": "array", "items": string}, "title": string, "include_test": boolean,"on_duplicate":{"enum":["existing","update","copy"]},"expected_version":integer,"document_id":string}, ["path"]),
         "convert": ("调用现有底座将目录知识图谱或PPT转换成可编辑HTML并入库；graph输入目录、ppt输入PPTX。", {"source": string, "kind": {"enum": ["graph", "ppt"]}, "project": string, "tags": {"type": "array", "items": string}}, ["source", "kind"]),
         "save": ("保存页面修改或批注为新版本。结构内容使用 JSONPointer patches[{path,value,original}]；静态页使用完整html。先get读当前version，expected_version防止覆盖。", {**common, "page_id": string, "patches": {"type": "array", "items": {"type": "object"}}, "feedback": {"type": "object"}, "html": string}, ["document_id", "page_id", "expected_version"]),
         "metadata": ("更新标题、项目、标签、收藏、归档、笔记。先get读取document.metadata_revision，用expected_metadata_revision防止旧客户端覆盖笔记；提供expected_version时必须同时提供属性修订号。不提供两个expected字段时为即时无条件更新。归档保留所有内容。", {**common, "expected_metadata_revision": {"type": "integer", "minimum": 0}, "title": string, "project": string, "tags": {"type": "array", "items": string}, "favorite": boolean, "archived": boolean, "notes": string}, ["document_id"]),
@@ -39,7 +39,28 @@ def tool_specs():
         "cancel": ("取消此生成任务，收束它的模型子进程，不干扰其他任务。", {"task_id": string}, ["task_id"]),
         "resume": ("在有限预算内接续同一个任务，仅继续未完成步骤；已保存draft不会重新调用模型。", {"task_id": string}, ["task_id"]),
     }
+    read_params={"document_id":string,"page_id":string,"version":integer,"scope":{"enum":["page","document","selection"]},"format":{"enum":["markdown","text","json"]},"selection":string,"include_notes":boolean,"include_feedback":boolean,"max_chars":integer,"rendered_html":string}
+    revision={**common,"expected_metadata_revision":integer}
+    actions.update({
+        "paths":("读取当前 HTML、文档入口、资源目录和来源路径及存在状态，指定 version 绑定历史版。",{"document_id":string,"page_id":string,"version":integer},["document_id"]),
+        "read":("读取普通或结构化 HTML 的正文、表格、代码和章节定位。scope=document 为整份；coverage 明示缺页、截断和未提取图像；省略 max_chars 不静默截断。",read_params,["document_id"]),
+        "export-text":("将所选范围完整正文导出 MD/TXT，不覆盖已有文件；缺页或截断拒绝称为全文。",{**read_params,"output":string},["document_id","output"]),
+        "export-page":("导出真正的单文件 HTML，内联本地 CSS/脚本/图片；跨页或资源不完整时明确要求完整包。",{"document_id":string,"output":string,"page_id":string,"version":integer},["document_id","output"]),
+        "export-folder":("导出完整离线 HTML 目录和资源，返回可打开的入口文件，不覆盖已有目录。",{"document_id":string,"output":string,"version":integer},["document_id","output"]),
+        "prepare-ai":("准备给本机 Agent 的路径/阅读命令，或正文/完整阅读附件。不发送给任何外部 AI。笔记与批注默认不附带。",{**read_params,"mode":{"enum":["local","text","attachment"]},"output":string,"request":string},["document_id"]),
+        "rename":("改文档显示标题和默认导出名；sync_content_title 同步结构化源标题时创建新版本，普通 HTML 正文标题通过编辑修改。",{**revision,"title":string,"sync_content_title":boolean},["document_id","title"]),
+        "trash":("移到废纸篓，保留版本、笔记、批注与原始来源；在途写任务须先取消。",revision,["document_id"]),
+        "untrash":("恢复同一 ID 的废纸篓文档，全部版本与个人属性保留。",revision,["document_id"]),
+        "purge":("不可恢复地清理废纸篓文档的托管内容；必须 confirmed=true，原始来源保留。",{**revision,"confirmed":boolean},["document_id","confirmed"]),
+        "duplicate":("复制当前版或明确指定的全部历史为新文档；笔记与批注需分别选择。",{"document_id":string,"title":string,"include_notes":boolean,"include_feedback":boolean,"include_history":boolean},["document_id"]),
+        "relink-source":("重新关联已移动的原始来源；保留之前的来源记录，不移动原件。",{**revision,"source":string},["document_id","source"]),
+        "rename-file":("修改包内 HTML 文件名和关联链接，发布新版本并保留旧版本。",{**revision,"page_id":string,"filename":string},["document_id","page_id","filename","expected_version"]),
+        "batch":("批量归档/分类/收藏或移入/恢复废纸篓，逐项返回结果。",{"document_ids":{"type":"array","items":string},"action":{"enum":["trash","untrash","metadata"]},"values":{"type":"object"}},["document_ids","action"]),
+        "find-source":("检查重复导入，返回使用同一来源的文档，包含归档和废纸篓。",{"path":string},["path"]),
+        "ask":("对保存版当前页/整份/选中文字提问；复用官方模型与后台任务。结果仅预览，不自动改原文或入库；范围和版本固化。",{**{k:v for k,v in read_params.items() if k not in {"format","max_chars"}},"request":string,"provider":{"enum":["codex","claude",None]},"timeout_seconds":{"type":"number"},"idempotency_key":string},["document_id","request"])
+    })
     from .agent import content_schema
+    actions["import"][1]["document_id"]=string
     actions["build"][1]["content"] = content_schema()
     return [{"name": "lumen_" + action, "description": description,
              "inputSchema": {"type": "object", "properties": properties, "required": required, "additionalProperties": False}}
@@ -59,8 +80,9 @@ def handle_message(message, state_dir=None, dispatcher=None):
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "Parameters must be an object"}}
     if method == "initialize":
         requested = params.get("protocolVersion")
+        from . import __version__
         result = {"protocolVersion": requested if requested in ("2024-11-05", "2025-03-26", "2025-06-18") else "2024-11-05",
-                  "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "Lumen", "version": "1.0.0"},
+                  "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "Lumen", "version": __version__},
                   "instructions": "个人本机HTML知识库。已有解释内容调用lumen_build；先lumen_get再基于expected_version更新，用户修改冲突不可覆盖。"}
     elif method == "ping":
         result = {}

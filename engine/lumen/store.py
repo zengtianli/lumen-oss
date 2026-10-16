@@ -99,7 +99,7 @@ def metadata_revision(existing, incoming):
     """All writers share the same revision for changed library properties."""
     if existing is None:
         return 0
-    fields = ("title", "project", "tags", "notes", "favorite", "archived", "source_path")
+    fields = ("title", "project", "tags", "notes", "favorite", "archived", "source_path", "sources", "trashed", "deleted_at")
     changed = any(existing.get(field) != incoming.get(field) for field in fields)
     return existing.get("metadata_revision", 0) + int(changed)
 
@@ -360,15 +360,21 @@ class Store:
 
     def document(self, document_id):
         self.document_root(document_id)
+        if (self.root / "purged" / (document_id + ".json")).exists():
+            raise LumenError("not_found", "这份文档已彻底删除", {"document_id": document_id})
         with self.connect() as db:
             row = db.execute("SELECT metadata FROM documents WHERE id=?", (document_id,)).fetchone()
         if row is None:
             raise LumenError("not_found", "知识库中没有这份成果", {"document_id": document_id})
         document = json.loads(row["metadata"])
         document.setdefault("metadata_revision", 0)
+        document.setdefault("trashed", False)
+        document.setdefault("deleted_at", None)
         return document
 
     def check_version(self, document, expected_version):
+        if document.get("trashed"):
+            raise LumenError("document_trashed", "文档在废纸篓中，请先恢复再修改")
         if expected_version is None or expected_version != document["version"]:
             raise LumenError("conflict", "成果已经更新，请比较当前版本后再保存", {"expected_version": expected_version, "current_version": document["version"]})
 
@@ -378,7 +384,7 @@ class Store:
             historic = read_json(self.version_root(document_id, version) / "metadata.json")
             if historic is None:
                 raise LumenError("not_found", "指定历史版本不存在")
-            personal = {key: document[key] for key in ("title", "favorite", "archived", "notes", "project", "tags", "source_path", "metadata_revision", "title_override") if key in document}
+            personal = {key: document[key] for key in ("title", "favorite", "archived", "notes", "project", "tags", "source_path", "sources", "metadata_revision", "title_override", "trashed", "deleted_at") if key in document}
             document = {**historic, **personal}
         folder = self.version_root(document_id, document["version"])
         pages = read_json(folder / "pages.json", [])
@@ -386,12 +392,17 @@ class Store:
             page.update(absolute_path=str(folder / "site" / page["relative_path"]), version=document["version"], document_id=document_id)
         return {"document": document, "pages": pages, "content": read_json(folder / "content.json"), "feedback": read_json(folder / "feedback.json", {}), "notes": document.get("notes", "")}
 
-    def list(self, query=None, project=None, kind=None, tag=None, favorite=None, archived=False):
+    def list(self, query=None, project=None, kind=None, tag=None, favorite=None, archived=False, trashed=False, sort="updated", descending=True):
         with self.connect() as db:
             rows = db.execute("SELECT metadata FROM documents").fetchall()
         documents = [json.loads(row["metadata"]) for row in rows]
         for document in documents:
             document.setdefault("metadata_revision", 0)
+            document.setdefault("trashed", False)
+            document.setdefault("deleted_at", None)
+        documents = [doc for doc in documents if not (self.root / "purged" / (doc["id"] + ".json")).exists()]
+        if trashed is not None:
+            documents = [doc for doc in documents if doc["trashed"] == bool(trashed)]
         if archived is not None:
             documents = [doc for doc in documents if doc["archived"] == bool(archived)]
         if favorite is not None:
@@ -404,12 +415,27 @@ class Store:
             documents = [doc for doc in documents if doc["kind"] == kind]
         if tag:
             documents = [doc for doc in documents if tag in doc["tags"]]
-        documents.sort(key=lambda doc: doc["updated_at"], reverse=True)
-        documents.sort(key=lambda doc: doc["favorite"], reverse=True)
+        if sort not in ("updated", "created", "title", "deleted", "recent") or not isinstance(descending, bool):
+            raise LumenError("invalid_sort", "排序支持 updated/created/title/deleted/recent")
+        if sort == "recent":
+            with self.connect() as db:
+                positions = {row["document_id"]:json.loads(row["value"]).get("read_at", "") for row in db.execute("SELECT * FROM positions")}
+            for doc in documents:
+                if doc["id"] not in positions:
+                    positions[doc["id"]]=read_json(self.document_root(doc["id"])/"position.json",{}).get("read_at","")
+            key = lambda doc: positions.get(doc["id"], "")
+        else:
+            field = {"updated":"updated_at","created":"created_at","title":"title","deleted":"deleted_at"}[sort]
+            key = lambda doc: (doc.get(field) or "").casefold()
+        documents.sort(key=key, reverse=descending)
+        if sort == "updated" and not trashed:
+            documents.sort(key=lambda doc: doc["favorite"], reverse=True)
         return {"documents": documents}
 
     def _publish(self, document, staged, pages, reason, idempotency_key=None):
         document_id = document["id"]
+        from .management import apply_page_overrides
+        apply_page_overrides(document, staged / "site", pages)
         destination = self.version_root(document_id, document["version"])
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
@@ -494,10 +520,20 @@ class Store:
                 if stage.exists():
                     shutil.rmtree(stage)
 
-    def import_document(self, path, kind=None, project=None, tags=None, title=None, include_test=False):
+    def import_document(self, path, kind=None, project=None, tags=None, title=None, include_test=False, on_duplicate="existing", expected_version=None, document_id=None):
+        if on_duplicate not in {"existing","update","copy"}:
+            raise LumenError("invalid_import", "重复导入方式为 existing/update/copy")
         path = Path(path).expanduser().resolve()
+        source_root=None
         if path.is_dir():
-            path /= "index.html"
+            folder=path
+            exported=read_json(folder/"metadata.json") if (folder/"metadata.json").is_file() and (folder/"site").is_dir() else None
+            if isinstance(exported,dict):
+                source_root=(folder/"site").resolve(); path=(source_root/exported.get("entry_relative","index.html")).resolve()
+                if not path.is_relative_to(source_root): raise LumenError("path_rejected", "导出目录的入口越界")
+            else:
+                path = folder / "index.html" if (folder/"index.html").is_file() else folder / "site" / "index.html"
+                source_root=path.parent
         if not path.is_file() or path.suffix.lower() not in (".html", ".htm"):
             raise LumenError("invalid_source", "请选择现有 HTML 或包含 index.html 的门户目录")
         if path.stat().st_size > 30 * 1024 * 1024:
@@ -506,14 +542,20 @@ class Store:
         # Serialize only this source; the library lock remains the publish owner.
         identity = hashlib.sha256(str(path).encode()).hexdigest()
         with library_lock(self.root / "imports" / identity):
-            existing = next((item for item in self.list(archived=None)["documents"] if item.get("source_path") == str(path)), None)
-            if existing:
+            if document_id:
+                if on_duplicate!="update": raise LumenError("invalid_import", "指定文档更新需明确 on_duplicate=update 和 expected_version")
+                self.check_version(self.document(document_id),expected_version)
+                return self._import_document(path,kind,project,tags,title,include_test,document_id=document_id,expected_version=expected_version,source_root=source_root)
+            existing = next((item for item in self.list(archived=None,trashed=None)["documents"] if item.get("source_path") == str(path) or any(s.get("path")==str(path) for s in item.get("sources",[]) if isinstance(s,dict))), None)
+            if existing and on_duplicate=="existing":
                 result = self.get(existing["id"])
                 result.update(reused=True, notice="已有这份来源，已打开库中版本并保留修改；更新请使用生成或构建的更新入口。")
                 return result
-            return self._import_document(path, kind, project, tags, title, include_test)
+            if existing and on_duplicate=="update":
+                return self._import_document(path,kind,project,tags,title,include_test,document_id=existing["id"],expected_version=expected_version,source_root=source_root)
+            return self._import_document(path, kind, project, tags, title or (existing["title"]+" 副本" if existing else None), include_test,source_root=source_root)
 
-    def _import_document(self, path, kind=None, project=None, tags=None, title=None, include_test=False):
+    def _import_document(self, path, kind=None, project=None, tags=None, title=None, include_test=False, document_id=None, expected_version=None, source_root=None):
         raw = path.read_text(encoding="utf-8")
         title_match = re.search(r"<title\b[^>]*>(.*?)</title>", raw, re.I | re.S)
         classification = path.name + " " + (title_match[1] if title_match else "")
@@ -524,34 +566,68 @@ class Store:
         if content_path.is_file():
             candidate = read_json(content_path)
             if isinstance(candidate, dict) and isinstance(candidate.get("pages"), list):
-                result = self.build(candidate, kind or "portal", project=project, tags=tags, sources=[{"path": str(path), "role": "imported-original"}])
+                result = self.build(candidate, kind or "portal", document_id=document_id,expected_version=expected_version,project=project, tags=tags, sources=[{"path": str(path), "role": "imported-original"}])
                 self.metadata(result["document"]["id"], source_path=str(path))
                 result["document"] = self.document(result["document"]["id"])
                 return result
         from .rendering import enhance_html
         with library_lock(self.root):
-            document_id = "doc-" + uuid.uuid4().hex[:20]
+            existing=self.document(document_id) if document_id else None
+            if existing: self.check_version(existing,expected_version)
+            document_id = document_id or "doc-" + uuid.uuid4().hex[:20]
             parsed_title, _ = parse_page(path)
-            document = self._new_metadata(document_id, title or parsed_title or path.stem, kind or "report", project=project, tags=tags)
-            document.update(structured=False, source_path=str(path), sources=[{"path": str(path), "role": "imported-original"}], entry_relative=path.name)
+            document = self._new_metadata(document_id, title or parsed_title or path.stem, kind or (existing or {}).get("kind") or "report", existing,project=project,tags=tags)
+            sources=deepcopy((existing or {}).get("sources",[]))
+            if not any(s.get("path")==str(path) for s in sources if isinstance(s,dict)): sources.append({"path":str(path),"role":"edited-copy" if existing else "imported-original"})
+            document.update(structured=False, source_path=(existing or {}).get("source_path") or str(path), sources=sources, entry_relative=path.name)
+            document["metadata_revision"]=metadata_revision(existing,document)
             stage = Path(tempfile.mkdtemp(prefix=".stage-", dir=self.root))
             try:
                 site = stage / "site"
                 site.mkdir()
-                files, warnings = self._copy_dependencies(path, site)
+                files, warnings = self._copy_dependencies(path, site,source_root)
                 pages = []
+                feedback=read_json(self.version_root(document_id,existing["version"])/"feedback.json",{}) if existing else {}
+                old_pages=read_json(self.version_root(document_id,existing["version"])/"pages.json",[]) if existing else []
+                old_ids={p["relative_path"]:p["id"] for p in old_pages}
+                old_entry=next((p for p in old_pages if p["relative_path"]==existing.get("entry_relative")),None) if existing else None
+                alias_target=(existing or {}).get("entry_alias_target")
+                if existing and existing.get("structured"):
+                    old_content=read_json(self.version_root(document_id,existing["version"])/"content.json",{})
+                    home=next((p for p in old_pages if p["id"]==old_content.get("home")),None)
+                    if home and home["relative_path"]!=existing.get("entry_relative") and path.name==existing.get("entry_relative"):
+                        alias_target=home["relative_path"]
+                        previous_entry=self.version_root(document_id,existing["version"])/"site"/existing["entry_relative"]
+                        if raw!=previous_entry.read_text(encoding="utf-8"):
+                            copied_home=site/alias_target
+                            previous_home=self.version_root(document_id,existing["version"])/"site"/alias_target
+                            if copied_home.is_file() and previous_home.is_file() and copied_home.read_text(encoding="utf-8") not in {previous_home.read_text(encoding="utf-8"),raw}:
+                                raise LumenError("edited_copy_conflict", "入口与首页副本都已分别修改，请合并为同一份首页内容后重新导入")
+                            (site/alias_target).write_text(raw,encoding="utf-8"); files.add(alias_target)
+                ignored_aliases=set()
+                if alias_target and path.name==(existing or {}).get("entry_relative"):
+                    from html import escape
+                    target=quote(alias_target,safe="/.")
+                    (site/path.name).write_text('<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url='+escape(target,quote=True)+'"><a href="'+escape(target,quote=True)+'">打开当前页面</a>',encoding="utf-8")
+                    document["entry_alias_target"]=alias_target; ignored_aliases.add(path.name)
+                if existing:
+                    for key,value in existing.get("page_path_overrides",{}).items():
+                        alias=key+".html"
+                        if alias!=value: ignored_aliases.add(alias)
                 for relative in sorted(files):
                     target = site / relative
-                    if target.suffix.lower() not in (".html", ".htm"):
+                    if relative in ignored_aliases or target.suffix.lower() not in (".html", ".htm"):
                         continue
-                    page_id = "page-" + hashlib.sha256(relative.encode()).hexdigest()[:12]
+                    page_id = old_ids.get(relative) or (old_entry["id"] if old_entry and relative==path.name else None) or "page-" + hashlib.sha256(relative.encode()).hexdigest()[:12]
                     page_title, _ = parse_page(target)
-                    enhanced = enhance_html(target.read_text(encoding="utf-8"), document_id, page_id, 1, labels=self._labels())
+                    enhanced = enhance_html(target.read_text(encoding="utf-8"), document_id, page_id, document["version"], labels=self._labels(),feedback=feedback.get(page_id))
                     if len(enhanced.encode("utf-8")) > 30 * 1024 * 1024:
                         raise LumenError("package_limit", "关联HTML页面含编辑器超过30MB保存预算，未导入不完整可编辑包")
                     target.write_text(enhanced, encoding="utf-8")
                     pages.append({"id": page_id, "title": page_title or target.stem, "relative_path": relative})
-                atomic_json(stage / "feedback.json", {})
+                order={p["id"]:i for i,p in enumerate(old_pages)}
+                pages.sort(key=lambda p:order.get(p["id"],-1 if p["relative_path"]==document.get("entry_alias_target",document["entry_relative"]) else len(order)))
+                atomic_json(stage / "feedback.json", feedback)
                 result = self._publish(document, stage, pages, "import")
                 result["validation"] = {"ok": not warnings, "files": len(files), "warnings": warnings}
                 return result
@@ -559,8 +635,8 @@ class Store:
                 if stage.exists():
                     shutil.rmtree(stage)
 
-    def _copy_dependencies(self, entry, site):
-        root = entry.parent.resolve()
+    def _copy_dependencies(self, entry, site, source_root=None):
+        root = Path(source_root or entry.parent).resolve()
         pending = [entry]
         seen = set()
         warnings = []
@@ -744,7 +820,7 @@ class Store:
             stage = Path(tempfile.mkdtemp(prefix=".stage-", dir=self.root))
             try:
                 shutil.copytree(old, stage, dirs_exist_ok=True)
-                document = {**read_json(old / "metadata.json"), "version": current["version"] + 1, "updated_at": now(), **{key: current[key] for key in ("favorite", "archived", "notes", "project", "tags", "source_path", "metadata_revision") if key in current}}
+                document = {**read_json(old / "metadata.json"), "version": current["version"] + 1, "updated_at": now(), **{key: current[key] for key in ("favorite", "archived", "notes", "project", "tags", "source_path", "sources", "source_history", "metadata_revision", "trashed", "deleted_at") if key in current}}
                 if "title_override" in current:
                     document.update(title_override=current["title_override"], title=current["title_override"])
                 document["metadata_revision"] = metadata_revision(current, document)
@@ -776,7 +852,7 @@ class Store:
         results = []
         for row in rows:
             document = json.loads(row["metadata"])
-            if document["archived"]:
+            if document["archived"] or document.get("trashed") or (self.root / "purged" / (document["id"] + ".json")).exists():
                 continue
             text = row["text"]
             index = text.casefold().find(query.strip().casefold())
@@ -796,10 +872,10 @@ class Store:
             position_file = self.document_root(document_id) / "position.json"
             position = json.loads(row[0]) if row else read_json(position_file, {})
             if page_id is not None or scroll_y is not None or anchor is not None:
-                position.update({key: value for key, value in {"page_id": page_id, "scroll_y": scroll_y, "anchor": anchor}.items() if value is not None})
+                position.update({key: value for key, value in {"page_id": page_id, "scroll_y": scroll_y, "anchor": anchor, "read_at":now()}.items() if value is not None})
                 atomic_json(position_file, position)
                 db.execute("INSERT OR REPLACE INTO positions VALUES(?,?)", (document_id, json.dumps(position, ensure_ascii=False)))
-        return {"position": position}
+        return {"position": {key:value for key,value in position.items() if key != "read_at"}}
 
     def export(self, document_id, output, version=None):
         import zipfile
@@ -823,6 +899,8 @@ class Store:
             if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(source_root):
                 raise LumenError("not_found", "指定版本不存在或文件不完整", {"version": selected_version, "path": str(path)})
         output = Path(output).expanduser().absolute()
+        from .reading import check_export_target
+        check_export_target(self,output)
         if os.path.lexists(output):
             raise LumenError("file_exists", "导出目标已存在，未覆盖")
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -855,6 +933,8 @@ class Store:
                     data = read_json(folder / "metadata.json")
                     if not data or not (folder / "site" / data.get("entry_relative", "index.html")).is_file():
                         continue
+                    if (self.root / "purged" / (data["id"] + ".json")).exists():
+                        continue
                     row = db.execute("SELECT metadata FROM documents WHERE id=?", (data["id"],)).fetchone()
                     current = json.loads(row[0]) if row else None
                     if not current or data["version"] > current["version"]:
@@ -862,6 +942,11 @@ class Store:
                         db.execute("INSERT OR REPLACE INTO documents VALUES(?,?)", (data["id"], json.dumps(data, ensure_ascii=False)))
                 for row in db.execute("SELECT metadata FROM documents").fetchall():
                     document = json.loads(row[0])
+                    if (self.root / "purged" / (document["id"] + ".json")).exists():
+                        db.execute("DELETE FROM documents WHERE id=?", (document["id"],))
+                        db.execute("DELETE FROM positions WHERE document_id=?", (document["id"],))
+                        db.execute("DELETE FROM idempotency WHERE document_id=?", (document["id"],))
+                        continue
                     document.setdefault("metadata_revision", 0)
                     properties = read_json(self.document_root(document["id"]) / "properties.json")
                     if properties and properties.get("id") == document["id"] and properties.get("version") == document["version"]:

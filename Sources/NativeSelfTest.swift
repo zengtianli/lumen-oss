@@ -26,6 +26,7 @@ import CryptoKit
         let identity = try LumenPaths.string(["id": document.id, "version": document.version, "page": controller.selectedPage?.id ?? ""])
         let deadline = Date().addingTimeInterval(12)
         while Date() < deadline {
+            if controller.reader.isLoading { try await Task.sleep(nanoseconds:100_000_000); continue }
             if let ready = try? await js(controller.reader, "(()=>{const d=\(identity);if(!window.LumenReader)return false;const s=window.LumenReader.snapshot();return s.document_id===d.id && s.expected_version===d.version && s.page_id===d.page})()"), ready as? Bool == true { return }
             try await Task.sleep(nanoseconds: 100_000_000)
         }
@@ -240,6 +241,11 @@ import CryptoKit
         let output = ProcessInfo.processInfo.environment["LUMEN_UI_OUT"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? LumenPaths.stateDirectory.appendingPathComponent("native-evidence")
         do {
             try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+            if CommandLine.arguments.contains("--management-self-test") {
+                checks = try await managementAndAI(controller,output:output)
+                finish(controller,checks:checks,evidence:["state_dir":controller.engine.stateDirectory.path,"scope":"production management and AI material actions","unverified":["实际鼠标拖动和实体键盘输入；通过生产动作和专用测试剪贴板验证，不触碰用户剪贴板。"]],output:output)
+                return
+            }
             guard let window = controller.window else { throw EngineFailure("window_missing", "生产窗口不存在。") }
             checks["native_title_visible"] = window.title == LumenPaths.displayName && window.titleVisibility == .visible && !window.titlebarAppearsTransparent
             checks["native_window_controls"] = [.titled, .closable, .miniaturizable, .resizable].allSatisfy { window.styleMask.contains($0) } && window.standardWindowButton(.closeButton) != nil && window.standardWindowButton(.miniaturizeButton) != nil && window.standardWindowButton(.zoomButton) != nil
@@ -302,6 +308,7 @@ import CryptoKit
             checks["native_generation_standard_guide"] = !(guidance["body"] as? String ?? "").isEmpty
             checks.merge(try await extraReaders(controller)) { a, b in a && b }
             checks.merge(try await draftProtection(controller)) { a, b in a && b }
+            checks.merge(try await managementAndAI(controller,output:output)) { a,b in a && b }
             await controller.open(documentID: document.id, pageID: "overview"); try await waitForDocument(controller)
             try await controller.persistPosition()
             let exitPosition = try await controller.engine.call("position", ["document_id": document.id])
@@ -316,10 +323,92 @@ import CryptoKit
             checks["quiet_no_window_dock_focus"] = NSApp.activationPolicy() == .prohibited && !NSApp.isActive && NSApp.windows.allSatisfy { !$0.isVisible && !$0.isKeyWindow }
             evidence = ["state_dir": controller.engine.stateDirectory.path, "document_id": document.id, "reader_bounds": NSStringFromRect(controller.reader.bounds), "reader_frame": NSStringFromRect(controller.reader.convert(controller.reader.bounds, to: window.contentView?.superview)), "window_frame_bounds": NSStringFromRect(window.contentView?.superview?.bounds ?? .zero), "snapshots": ["library-light.png", "library-dark.png", "settings-light.png", "settings-dark.png"], "unverified": ["实际鼠标拖动、红黄绿按钮点击与实体键盘输入；验收直接调用生产动作，不合成用户输入。"]]
         } catch { checks["completed"] = false; evidence["error"] = error.localizedDescription }
+        finish(controller,checks:checks,evidence:evidence,output:output)
+    }
+    static func finish(_ controller:LibraryWindowController,checks:[String:Bool],evidence:JSON,output:URL) {
         let report: JSON = ["ok": !checks.isEmpty && checks.values.allSatisfy { $0 }, "checks": checks, "evidence": evidence]
         let data = (try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])) ?? Data()
         try? data.write(to: output.appendingPathComponent("native-ui.json"), options: .atomic)
         print(String(decoding: data, as: UTF8.self)); fflush(stdout)
         controller.stopObservation(); exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+    }
+
+    static func snapshotPanel(_ window:NSWindow,to output:URL) throws {
+        guard NSApp.activationPolicy() == .prohibited, let view = window.contentView?.superview else { throw EngineFailure("offscreen_required","面板截图须离屏运行") }
+        view.layoutSubtreeIfNeeded()
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in:view.bounds) else { throw EngineFailure("snapshot_failed","面板渲染失败") }
+        view.cacheDisplay(in:view.bounds,to:bitmap)
+        guard let data = bitmap.representation(using:.png,properties:[:]), data.count>3000 else { throw EngineFailure("snapshot_empty","面板截图没有有效内容") }
+        try data.write(to:output,options:.atomic)
+    }
+
+    static func managementAndAI(_ controller:LibraryWindowController,output:URL) async throws -> [String:Bool] {
+        var checks:[String:Bool]=[:]
+        let content:JSON=["title":"文档管理与 AI 阅读验收","home":"first","pages":[["id":"first","title":"结论","blocks":[["type":"prose","text":"方案流量为 12.5，依据在第二页。"]]],["id":"second","title":"依据与数据","blocks":[["type":"table","headers":["指标","数值"],"rows":[["流量",12.5]]],["type":"code","language":"python","text":"flow = 12.5\nprint(flow)"]]]]]
+        let result = try await controller.engine.call("build",["content":content,"kind":"portal","project":"产品验收"])
+        guard let raw = result["document"] as? JSON, let doc = KnowledgeDocument(raw) else { throw EngineFailure("document_missing","管理样本未返回") }
+        await controller.refresh(); await controller.open(documentID:doc.id,pageID:"second"); try await waitForDocument(controller)
+        checks["management_primary_controls"] = controller.copyAIButton.isEnabled && controller.infoButton.isEnabled && controller.locationButton.isEnabled && controller.documentsTable.allowsMultipleSelection
+        checks["management_sidebar_trash"] = controller.sidebar.numberOfRows == 8
+        let paths = try await controller.engine.call("paths",["document_id":doc.id,"page_id":"second","version":1])
+        checks["management_current_html_distinct_entry"] = (paths["current_html"] as? JSON)?["filename"] as? String == "second.html" && (paths["entry_html"] as? JSON)?["filename"] as? String == "index.html"
+        let domain = ProcessInfo.processInfo.environment["LUMEN_DEFAULTS_DOMAIN"] ?? "isolated"
+        let boardName = "lumen-test-"+domain+"-"+UUID().uuidString
+        setenv("LUMEN_TEST_PASTEBOARD",boardName,1); let board = NSPasteboard(name:.init(boardName))
+        defer { board.clearContents(); unsetenv("LUMEN_TEST_PASTEBOARD") }
+        let material = try await controller.copyCurrentMaterial()
+        checks["management_copy_ai_actual_named_pasteboard"] = board.string(forType:.string) == material["copy_text"] as? String && (material["scope"] as? String) == "page" && ((material["pages"] as? [JSON])?.first?["id"] as? String) == "second"
+        let info = DocumentInformationController(library:controller,documentID:doc.id,pageID:"second",version:1); await info.load()
+        checks["management_information_panel_real_paths"] = info.records.count >= 3 && info.records.contains { $0["filename"] as? String == "second.html" }
+        if let window = info.window { try snapshotPanel(window,to:output.appendingPathComponent("document-information.png")) }
+        let ai = AIReadingController(library:controller,documentID:doc.id,pageID:"second",version:1,scope:"document"); await ai.prepare()
+        checks["management_ai_panel_all_pages"] = (ai.prepared?["coverage"] as? JSON)?["extracted_pages"] as? Int == 2
+        if let window = ai.window { try snapshotPanel(window,to:output.appendingPathComponent("ai-reading.png")) }
+        let renamed = try await controller.engine.call("rename",["document_id":doc.id,"title":"重新命名的文档","expected_version":1,"expected_metadata_revision":0])
+        await controller.open(documentID:doc.id,pageID:"second"); try await waitForDocument(controller)
+        checks["management_rename_native_readback"] = controller.selectedDocument?.title == "重新命名的文档" && controller.titleField.stringValue == "重新命名的文档"
+        _ = try await js(controller.reader,"window.LumenReader.setEditing(true);const p=document.querySelector('td');p.textContent='未保存修改';p.dispatchEvent(new Event('input',{bubbles:true}));true")
+        do { _ = try await controller.prepareSavedAction(documentIDs:[doc.id],purpose:"验收删除"); checks["management_unsaved_blocks_offscreen_action"] = false } catch { checks["management_unsaved_blocks_offscreen_action"] = (error as? EngineFailure)?.code == "unsaved_changes" }
+        _ = try await js(controller.reader,"window.LumenReader.discardDraft();true"); await controller.open(documentID:doc.id,pageID:"second"); try await waitForDocument(controller)
+        let renamedDoc = renamed["document"] as? JSON ?? [:]
+        _ = try await controller.engine.call("trash",["document_id":doc.id,"expected_version":1,"expected_metadata_revision":renamedDoc["metadata_revision"] as? Int ?? 1])
+        await controller.open(documentID:doc.id,pageID:"second"); try await waitForDocument(controller)
+        checks["management_trash_disables_edit"] = controller.selectedDocument?.trashed == true && !controller.copyAIButton.isEnabled
+        let trashMenu = controller.documentMenu(); checks["management_trash_restore_purge_menu"] = trashMenu.items.contains { $0.action == #selector(LibraryWindowController.restoreTrashedDocuments(_:)) } && trashMenu.items.contains { $0.action == #selector(LibraryWindowController.purgeDocuments(_:)) }
+        _ = try await controller.engine.call("untrash",["document_id":doc.id]); await controller.open(documentID:doc.id,pageID:"second"); try await waitForDocument(controller)
+        _ = try await controller.engine.call("rename-file",["document_id":doc.id,"page_id":"second","filename":"证据.html","expected_version":1])
+        await controller.open(documentID:doc.id,pageID:"second"); try await waitForDocument(controller)
+        let renamedBody = try await js(controller.reader,"document.body.innerText") as? String ?? ""
+        checks["management_rename_html_native_load"] = controller.selectedPage?.absolutePath.hasSuffix("证据.html") == true && renamedBody.contains("12.5")
+        await controller.open(documentID:doc.id,pageID:"second",version:1); try await waitForDocument(controller)
+        checks["management_history_bound_paths"] = controller.viewingHistorical && controller.selectedPage?.absolutePath.hasSuffix("second.html") == true
+        let oldMaterial = try await controller.copyCurrentMaterial(); checks["management_history_bound_ai"] = oldMaterial["version"] as? Int == 1
+        await controller.open(documentID:doc.id,pageID:"second"); try await waitForDocument(controller)
+        let other = try await controller.engine.call("build",["content":["title":"右键目标 B","pages":[["id":"b","title":"B","blocks":[["type":"prose","text":"B 的内容"]]]]],"kind":"report"])
+        guard let b = KnowledgeDocument(other["document"] as? JSON ?? [:]), let a = controller.selectedDocument else { throw EngineFailure("document_missing","右键样本未返回") }
+        controller.documents = [a,b]; controller.matches = []; controller.documentsTable.reloadData(); controller.documentsTable.selectRowIndexes(IndexSet(integer:1),byExtendingSelection:false)
+        let menu = controller.documentMenu(row:1)
+        let rename = menu.items.first { $0.action == #selector(LibraryWindowController.renameDocument(_:)) }
+        checks["management_clicked_row_target"] = ((rename?.representedObject as? JSON)?["document_ids"] as? [String]) == [b.id]
+        await controller.refresh(); await controller.open(documentID:doc.id,pageID:"second"); try await waitForDocument(controller)
+        _ = try await controller.engine.call("settings",["values":["labels":["copy_ai":"热更新复制验收"]]])
+        await controller.refresh(); checks["management_new_labels_runtime"] = controller.copyAIButton.title == "热更新复制验收"
+        _ = try await controller.engine.call("settings",["values":["labels":["copy_ai":"复制给 AI"]]]); await controller.refresh()
+        if let row=controller.documents.firstIndex(where: { $0.id == doc.id }), let promise=controller.tableView(controller.documentsTable,pasteboardWriterForRow:row) as? NSFilePromiseProvider {
+            let target=output.appendingPathComponent("drag-export.zip")
+            let error:Error?=await withCheckedContinuation { continuation in controller.filePromiseProvider(promise,writePromiseTo:target) { continuation.resume(returning:$0) } }
+            checks["management_drag_export_actual_zip"]=error == nil && FileManager.default.fileExists(atPath:target.path)
+        } else { checks["management_drag_export_actual_zip"]=false }
+        checks["management_drag_in_registered"]=controller.documentsTable.registeredDraggedTypes.contains(.fileURL)
+        let answerContent:JSON=["title":"阅读答案","home":"answer","pages":[["id":"answer","title":"结论","blocks":[["type":"prose","text":"流量为 12.5，依据为第二页的数据表。"]]]]]
+        let answerUI=AIReadingController(library:controller,documentID:doc.id,pageID:"second",version:2,scope:"document")
+        answerUI.accept(task:["id":"ask-native-transaction","status":"succeeded","params":["source_version":2,"read_scope":"document"],"result":["content":answerContent,"answer":"流量为 12.5","source_version":2,"coverage":["extracted_pages":2]]])
+        let saved=try await answerUI.saveAnswerContent(title:"另存的阅读答案")
+        checks["management_ai_answer_save_new_document"]=(saved["document"] as? JSON)?["id"] as? String != doc.id && (saved["document"] as? JSON)?["title"] as? String == "另存的阅读答案"
+        let plan=try await answerUI.answerAppendPlan(), appended=try await answerUI.commitAnswerAppend(plan)
+        checks["management_ai_answer_append_new_version"]=(appended["document"] as? JSON)?["version"] as? Int == 3 && ((plan["content"] as? JSON)?["pages"] as? [JSON])?.count == 3
+        do { _ = try await answerUI.commitAnswerAppend(plan); checks["management_ai_answer_stale_commit_rejected"]=false } catch { checks["management_ai_answer_stale_commit_rejected"]=(error as? EngineFailure)?.code == "conflict" }
+        checks["management_no_window_dock_clipboard_interference"] = NSApp.activationPolicy() == .prohibited && !NSApp.isActive && NSApp.windows.allSatisfy { !$0.isVisible && !$0.isKeyWindow }
+        return checks
     }
 }

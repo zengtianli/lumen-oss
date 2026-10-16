@@ -216,6 +216,26 @@ def create_task(params, state_dir=None, *, launch=True):
     return launch_task(task_id, state_dir) if launch else _public(task)
 
 
+def create_ask(params, state_dir=None, *, launch=True):
+    from .store import Store
+    from .reading import prepare_ai
+    from .settings import settings
+    if not isinstance(params.get("request"),str) or not params["request"].strip():
+        raise LumenError("invalid_request", "请输入要问 AI 的问题")
+    store=Store(state_dir)
+    reading_keys=("page_id","version","scope","selection","include_notes","include_feedback","rendered_html")
+    material=prepare_ai(store,params["document_id"],mode="local",**{k:params[k] for k in reading_keys if k in params})
+    budget=settings(store.root)["settings"]["generation"]["max_source_bytes"]
+    if Path(material["path"]).stat().st_size>budget:
+        raise LumenError("context_too_large", "完整材料超过当前模型来源预算，请选择章节或选中文字；未静默截断全文", {"bytes":Path(material["path"]).stat().st_size,"budget":budget,"coverage":material["coverage"]})
+    generated={"source":material["path"],"request":params["request"],"kind":"report","max_source_bytes":budget,"operation":"ask",
+               "source_document_id":params["document_id"],"source_version":material["version"],"source_page_id":material["pages"][0]["id"] if len(material["pages"])==1 else None,"read_scope":material["scope"],"read_coverage":material["coverage"]}
+    generated.update({k:params[k] for k in ("provider","timeout_seconds","idempotency_key") if k in params})
+    # Preview tasks deliberately do not set document_id: they cannot write into
+    # the source document and are not treated as active source writers.
+    return create_task(generated,state_dir,launch=launch)
+
+
 def _runtime():
     try:
         import task_runtime
@@ -304,6 +324,12 @@ def run_task(task_id, state_dir=None, *, model_runner=None, dispatcher=None):
             if time.time() >= task["deadline_at"]:
                 raise LumenError("deadline_exceeded", "生成达到时间预算")
             draft = json.loads((folder / "draft.json").read_text(encoding="utf-8"))
+            if task["params"].get("operation")=="ask":
+                from .reading import _structured_page
+                answer="\n\n".join(["# "+draft["title"],*["## "+p["title"]+"\n\n"+_structured_page(p) for p in draft["pages"]]])
+                result={"answer":answer,"content":draft,"source_document_id":task["params"]["source_document_id"],"source_version":task["params"]["source_version"],"scope":task["params"]["read_scope"],"coverage":task["params"]["read_coverage"],"preview_only":True}
+                _atomic(folder/"answer.json",result)
+                return _public(_update(task_id,{"status":"succeeded","step":"done","checkpoint":"preview","completed_at":_now(),"result":result,"model_pid":None},state_dir))
             task = _update(task_id, {"checkpoint": "draft", "step": "build"}, state_dir)
             result_path = folder / "build_result.json"
             if result_path.is_file():
@@ -366,6 +392,8 @@ def dispatch_job(action, params=None, state_dir=None):
     params = params or {}
     if action == "generate":
         return {"task": create_task(params, state_dir)}
+    if action == "ask":
+        return {"task": create_ask(params,state_dir)}
     if action == "tasks":
         return {"tasks": list_tasks(state_dir)}
     task_id = params.get("task_id")

@@ -4,7 +4,8 @@ from .store import Store
 from .types import LumenError
 
 
-ACTIONS = ["status", "list", "get", "build", "import", "save", "metadata", "versions", "compare", "restore", "search", "feedback", "position", "settings", "export", "config-export", "config-import", "reindex", "convert", "guide", "discover", "generate", "task", "tasks", "cancel", "resume"]
+ACTIONS = ["status", "list", "get", "build", "import", "save", "metadata", "versions", "compare", "restore", "search", "feedback", "position", "settings", "export", "config-export", "config-import", "reindex", "convert", "guide", "discover", "generate", "task", "tasks", "cancel", "resume", "rename", "paths", "trash", "untrash", "purge", "duplicate", "relink-source", "rename-file", "batch", "read", "export-text", "prepare-ai", "find-source", "ask"]
+ACTIONS += ["export-page", "export-folder"]
 
 
 def dispatch(action, params=None, state_dir=None):
@@ -13,7 +14,7 @@ def dispatch(action, params=None, state_dir=None):
         if not isinstance(params, dict):
             raise LumenError("invalid_params", "参数必须为对象")
         store = Store(state_dir)
-        if action in ("generate", "task", "tasks", "cancel", "resume"):
+        if action in ("generate", "task", "tasks", "cancel", "resume", "ask"):
             from .jobs import dispatch_job
             result = dispatch_job(action, params, str(store.root))
         elif action == "status":
@@ -23,7 +24,17 @@ def dispatch(action, params=None, state_dir=None):
                 tasks = list_tasks(str(store.root))
             except ImportError:
                 tasks = []
-            result = {"version": __version__, "state_dir": str(store.root), "documents": len(store.list(archived=False)["documents"]), "archived": len(store.list(archived=True)["documents"]), "tasks": tasks, "settings": settings(store.root)["settings"], "modes": [{"id": "portal", "title": "门户"}, {"id": "report", "title": "阅读与报告"}, {"id": "teach", "title": "教学"}]}
+            result = {"version": __version__, "state_dir": str(store.root), "documents": len(store.list(archived=False)["documents"]), "archived": len(store.list(archived=True)["documents"]), "trashed":len(store.list(archived=None,trashed=True)["documents"]), "tasks": tasks, "settings": settings(store.root)["settings"], "modes": [{"id": "portal", "title": "门户"}, {"id": "report", "title": "阅读与报告"}, {"id": "teach", "title": "教学"}]}
+        elif action in ("read", "export-text", "prepare-ai", "export-page", "export-folder"):
+            from .reading import read_document, export_text, prepare_ai, export_page, export_folder
+            result = {"read":read_document,"export-text":export_text,"prepare-ai":prepare_ai,"export-page":export_page,"export-folder":export_folder}[action](store,**params)
+        elif action == "find-source":
+            from pathlib import Path
+            target=str(Path(params["path"]).expanduser().resolve())
+            result={"documents":[d for d in store.list(archived=None,trashed=None)["documents"] if d.get("source_path")==target or any(s.get("path")==target for s in d.get("sources",[]) if isinstance(s,dict))]}
+        elif action in ("rename", "paths", "trash", "untrash", "purge", "duplicate", "relink-source", "rename-file", "batch"):
+            from .management import ACTIONS as management_actions
+            result=management_actions[action](store,**params)
         elif action == "settings":
             from .settings import settings
             result = settings(store.root, **params)

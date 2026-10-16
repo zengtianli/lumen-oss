@@ -30,12 +30,16 @@ private struct MetadataDraft: Codable, Equatable {
 
 final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTableViewDelegate, NSTableViewDataSource, NSSearchFieldDelegate, NSTextViewDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     let engine: EngineClient
-    let sidebar = NSTableView(), documentsTable = NSTableView(), searchField = NSSearchField()
+    let sidebar = NSTableView(), documentsTable = DocumentTableView(), searchField = NSSearchField()
     let projectPopup = NSPopUpButton(), tagPopup = NSPopUpButton(), pagePopup = NSPopUpButton()
     let reader: WKWebView
     let status = NSTextField(labelWithString: ""), countLabel = NSTextField(labelWithString: "")
     let progress = NSProgressIndicator(), favoriteButton = NSButton(), inspectorButton = NSButton()
-    private var generateButton = NSButton(), importButton = NSButton(), saveButton = NSButton()
+    let copyAIButton = NSButton(), moreButton = NSButton(), infoButton = NSButton(), locationButton = NSButton(), sortPopup = NSPopUpButton()
+    var informationWindow: DocumentInformationController?, aiWindow: AIReadingController?
+    var lastTrashedIDs: [String] = []
+    private var generateButton = NSButton(), importButton = NSButton(), saveButton = NSButton(), editButton = NSButton()
+    var viewingHistorical = false
     var generationLabel: String { generateButton.title }
     let notes = NSTextView(), titleField = NSTextField(), projectField = NSTextField(), tagsField = NSTextField()
     let versionPopup = NSPopUpButton(), versionLabel = NSTextField(labelWithString: "")
@@ -48,8 +52,9 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
     private var sidebarIndex = 0, queryGeneration = 0, openingGeneration = 0
     private var observingTaskID: String?, taskTimer: Timer?, searchTimer: Timer?
     private var pendingScroll: Double?, pendingAnchor: String?, notesDirty = false, bindingPage = false
-    private let sidebarNames = ["全部知识", "收藏", "最近阅读", "门户", "阅读与报告", "教学", "已归档"]
-    private let sidebarSymbols = ["books.vertical", "star", "clock", "rectangle.3.group", "doc.text", "graduationcap", "archivebox"]
+    private var metadataWriteTicket = 0
+    private let sidebarNames = ["全部知识", "收藏", "最近阅读", "门户", "阅读与报告", "教学", "已归档", "废纸篓"]
+    private let sidebarSymbols = ["books.vertical", "star", "clock", "rectangle.3.group", "doc.text", "graduationcap", "archivebox", "trash"]
     private var sidebarContainer = NSView(), listContainer = NSView(), readerContainer = NSView()
     private var readingWidth: NSLayoutConstraint?
     private var generateSheet: GenerateSheetController?
@@ -81,6 +86,7 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
         reader.navigationDelegate = self
         configuration.userContentController.add(self, name: "lumenSave")
         configuration.userContentController.add(self, name: "lumenPosition")
+        configuration.userContentController.add(self, name: "lumenDirty")
         makeInterface(); window.center()
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -138,7 +144,12 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
         let docColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("documents")); documentsTable.addTableColumn(docColumn)
         documentsTable.headerView = nil; documentsTable.rowHeight = 65; documentsTable.delegate = self; documentsTable.dataSource = self
         documentsTable.focusRingType = .none; documentsTable.usesAlternatingRowBackgroundColors = false
-        let listStack = stack([searchField, filters, scroll(documentsTable)], spacing: 9); listStack.edgeInsets = NSEdgeInsets(top: 14, left: 10, bottom: 0, right: 10)
+        documentsTable.allowsMultipleSelection = true; documentsTable.library = self
+        documentsTable.registerForDraggedTypes([.fileURL]); documentsTable.setDraggingSourceOperationMask(.copy, forLocal: false)
+        sortPopup.addItems(withTitles: ["最近更新", "创建时间", "最近阅读", "标题 A–Z", "删除时间"])
+        sortPopup.selectItem(at: min(4, max(0, LumenPaths.defaults.integer(forKey: "library.sort"))))
+        sortPopup.target = self; sortPopup.action = #selector(sortChanged)
+        let listStack = stack([searchField, filters, sortPopup, scroll(documentsTable)], spacing: 9); listStack.edgeInsets = NSEdgeInsets(top: 14, left: 10, bottom: 0, right: 10)
         fill(listStack, in: listContainer)
         for view in listStack.arrangedSubviews { view.widthAnchor.constraint(equalTo: listStack.widthAnchor, constant: -20).isActive = true }
         listContainer.widthAnchor.constraint(greaterThanOrEqualToConstant: 245).isActive = true; listContainer.widthAnchor.constraint(lessThanOrEqualToConstant: 340).isActive = true
@@ -147,15 +158,24 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
         pagePopup.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let back = button("", symbol: "chevron.left", action: #selector(goBack)); back.toolTip = "返回上一页 ⌘["
         let edit = button("编辑", symbol: "pencil", action: #selector(editPage))
+        editButton = edit
         let save = button("保存", symbol: "checkmark", action: #selector(savePage)); saveButton = save; save.toolTip = "保存页面与批注 ⌘S"
         favoriteButton.title = ""; favoriteButton.target = self; favoriteButton.action = #selector(toggleFavorite); favoriteButton.bezelStyle = .rounded
         inspectorButton.title = ""; inspectorButton.target = self; inspectorButton.action = #selector(toggleInspector); inspectorButton.bezelStyle = .rounded
         inspectorButton.image = NSImage(systemSymbolName: "sidebar.trailing", accessibilityDescription: "笔记与版本")
-        let readerTools = stack([back, pagePopup, edit, save, favoriteButton, inspectorButton], vertical: false, spacing: 7)
+        copyAIButton.title = "复制给 AI"; copyAIButton.bezelStyle = .rounded; copyAIButton.target = self; copyAIButton.action = #selector(copyCurrentForAI)
+        copyAIButton.toolTip = "准备当前页正文或本机 Agent 阅读材料；可选择整份文档"
+        moreButton.title = ""; moreButton.bezelStyle = .rounded; moreButton.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "文档操作")
+        moreButton.target = self; moreButton.action = #selector(showMoreMenu(_:)); moreButton.toolTip = "重命名、删除、导出与路径"
+        infoButton.title = ""; infoButton.bezelStyle = .rounded; infoButton.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: "文档信息")
+        infoButton.target = self; infoButton.action = #selector(showDocumentInformation); infoButton.toolTip = "当前 HTML、文档入口与原始来源 ⌘I"
+        let readerTools = stack([back, pagePopup, edit, save, copyAIButton, moreButton, infoButton, favoriteButton, inspectorButton], vertical: false, spacing: 7)
         readerTools.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
         progress.style = .spinning; progress.controlSize = .small; progress.isDisplayedWhenStopped = false
         status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor; status.lineBreakMode = .byTruncatingTail
-        let footer = stack([progress, status], vertical: false, spacing: 8); footer.edgeInsets = NSEdgeInsets(top: 7, left: 12, bottom: 8, right: 12)
+        locationButton.title = "文件位置"; locationButton.bezelStyle = .rounded; locationButton.controlSize = .small; locationButton.target = self; locationButton.action = #selector(showDocumentInformation)
+        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let footer = stack([progress, status, locationButton], vertical: false, spacing: 8); footer.edgeInsets = NSEdgeInsets(top: 7, left: 12, bottom: 8, right: 12)
         let reading = stack([readerTools, reader, footer], spacing: 0)
         for view in reading.arrangedSubviews { view.widthAnchor.constraint(equalTo: reading.widthAnchor).isActive = true }
         let readerAndInspector = stack([reading, inspector], vertical: false, spacing: 0); readerAndInspector.alignment = .top
@@ -168,7 +188,7 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
         readingWidth?.isActive = true
         split.addArrangedSubview(sidebarContainer); split.addArrangedSubview(listContainer); split.addArrangedSubview(readerContainer)
         split.setHoldingPriority(.defaultHigh, forSubviewAt: 0); split.setHoldingPriority(.defaultHigh, forSubviewAt: 1); split.setHoldingPriority(.defaultLow, forSubviewAt: 2)
-        sidebarIndex = min(6, max(0, LumenPaths.defaults.integer(forKey: "library.sidebar")))
+        sidebarIndex = min(7, max(0, LumenPaths.defaults.integer(forKey: "library.sidebar")))
         sidebar.selectRowIndexes(IndexSet(integer: sidebarIndex), byExtendingSelection: false)
         updateDocumentUI()
         reader.loadHTMLString("<!doctype html><html lang='zh'><meta charset='utf-8'><style>body{font:16px -apple-system;padding:72px;color:#3d5264;background:#fbfcfe}h1{font-size:30px;color:#183a4b}p{line-height:1.8;max-width:560px}</style><h1>让成果成为知识</h1><p>从左侧打开 HTML 门户、报告或教学页面。也可以生成新的知识，或导入已经完成的成果。</p><p>阅读、编辑与个人笔记保存在同一知识库，agent 可以通过 CLI、API 和 MCP 接着使用。</p></html>", baseURL: nil)
@@ -265,7 +285,10 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
         guard pages.indices.contains(pagePopup.indexOfSelectedItem) else { return }
         let page = pages[pagePopup.indexOfSelectedItem]; Task { await loadPage(page, scroll: 0, anchor: nil) }
     }
-    @objc func versionChoiceChanged() { }
+    @objc func versionChoiceChanged() {
+        guard let document = selectedDocument, versions.indices.contains(versionPopup.indexOfSelectedItem), let version = versions[versionPopup.indexOfSelectedItem]["version"] as? Int else { return }
+        Task { await open(documentID: document.id, pageID: selectedPage?.id, version: version) }
+    }
     @objc func goBack() { reader.goBack() }
     @objc func editPage() { reader.evaluateJavaScript("window.LumenReader && window.LumenReader.setEditing(true)") }
     @objc func savePage() {
@@ -282,10 +305,12 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
     }
     func focusSearch() { window?.makeFirstResponder(searchField); searchField.selectText(nil) }
 
-    func refresh() async {
+    func refresh(updateStatus:Bool=true) async {
         queryGeneration += 1; let ticket = queryGeneration
         let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        var params: JSON = ["archived": sidebarIndex == 6]
+        var params: JSON = ["archived": sidebarIndex == 7 ? NSNull() : sidebarIndex == 6, "trashed":sidebarIndex == 7]
+        let sort = ["updated", "created", "recent", "title", "deleted"][max(0, sortPopup.indexOfSelectedItem)]
+        params["sort"] = sort; params["descending"] = sort != "title"
         if sidebarIndex == 1 { params["favorite"] = true }
         if let kind = [3: "portal", 4: "report", 5: "teach"][sidebarIndex] { params["kind"] = kind }
         if projectPopup.indexOfSelectedItem > 0 { params["project"] = projectPopup.titleOfSelectedItem }
@@ -299,7 +324,7 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
                 let recent = LumenPaths.defaults.stringArray(forKey: "reading.recent") ?? []
                 documents.sort { (recent.firstIndex(of: $0.id) ?? Int.max) < (recent.firstIndex(of: $1.id) ?? Int.max) }
             }
-            if query.isEmpty { matches = [] } else {
+            if query.isEmpty || sidebarIndex == 7 { matches = []; if !query.isEmpty { documents = documents.filter { $0.title.localizedCaseInsensitiveContains(query) } } } else {
                 let found = try await engine.call("search", ["query": query, "limit": 100])
                 guard ticket == queryGeneration else { return }
                 let allowed = Set(documents.map(\.id))
@@ -307,7 +332,7 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
                 if matches.isEmpty { documents = [] }
             }
             documentsTable.reloadData(); countLabel.stringValue = query.isEmpty ? "\(documents.count) 份知识" : "\(matches.count) 处匹配"
-            status.stringValue = query.isEmpty ? "本机知识库 · 页面可离线打开" : (matches.isEmpty ? "没有找到匹配内容" : "点击结果定位到对应章节和段落")
+            if updateStatus { status.stringValue = query.isEmpty ? "本机知识库 · 页面可离线打开" : (matches.isEmpty ? "没有找到匹配内容" : "点击结果定位到对应章节和段落") }
             if allDocuments.isEmpty || query.isEmpty {
                 let all = try await engine.call("list", [:]); guard ticket == queryGeneration else { return }
                 allDocuments = (all["documents"] as? [JSON] ?? []).compactMap(KnowledgeDocument.init)
@@ -318,6 +343,9 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
             Remote.ui = FeedUI(copy: Dictionary(uniqueKeysWithValues: labels.map { ("mac.label." + $0.key, $0.value) }))
             generateButton.title = T("mac.label.generate", "生成知识"); importButton.title = T("mac.label.import", "导入 HTML"); saveButton.title = T("mac.label.save", "保存")
             searchField.placeholderString = T("mac.label.search", "全文搜索知识")
+            copyAIButton.title = T("mac.label.copy_ai", "复制给 AI")
+            locationButton.title = T("mac.label.paths", "文件位置")
+            (NSApp.delegate as? LumenAppDelegate)?.refreshDocumentMenuLabels()
         } catch { if ticket == queryGeneration { showError(error) } }
         if ticket == queryGeneration { progress.stopAnimation(nil); libraryRefreshed = true; announceReadyIfNeeded() }
     }
@@ -331,7 +359,7 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
         if let tag, tagPopup.itemTitles.contains(tag) { tagPopup.selectItem(withTitle: tag) }
     }
 
-    func open(documentID: String, pageID: String? = nil, anchor: String? = nil) async {
+    func open(documentID: String, pageID: String? = nil, anchor: String? = nil, version: Int? = nil) async {
         do { try captureMetadataDraft(throwOnFailure: true) }
         catch { showError(EngineFailure("draft_not_saved", "未能保存本机草稿，请先保存笔记再切换成果：" + error.localizedDescription)); return }
         openingGeneration += 1; let ticket = openingGeneration
@@ -339,9 +367,12 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
         guard ticket == openingGeneration else { return }
         progress.startAnimation(nil)
         do {
-            let result = try await engine.call("get", ["document_id": documentID])
+            var params: JSON = ["document_id": documentID]; if let version { params["version"] = version }
+            let result = try await engine.call("get", params)
             guard ticket == openingGeneration, let value = result["document"] as? JSON, let document = KnowledgeDocument(value) else { return }
             selectedDocument = document; selectedPage = nil; pages = (result["pages"] as? [JSON] ?? []).compactMap(KnowledgePage.init)
+            let latest = version == nil ? document.version : (((try? await engine.call("get", ["document_id":documentID]))?["document"] as? JSON)?["version"] as? Int ?? document.version)
+            viewingHistorical = document.version != latest
             homePageID = (result["content"] as? JSON)?["home"] as? String ?? pages.first?.id
             var position: JSON = [:]
             let settings = (try? await engine.call("settings"))?["settings"] as? JSON ?? [:]
@@ -373,6 +404,7 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
         }
         reader.loadFileURL(URL(fileURLWithPath: page.absolutePath), allowingReadAccessTo: root)
         status.stringValue = page.title + " · v\(selectedDocument?.version ?? 1)"
+        locationButton.toolTip = "当前 HTML：" + page.absolutePath
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         let offset = pendingScroll ?? 0, anchor = pendingAnchor ?? ""
@@ -460,6 +492,10 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
         guard sourcePath == pagePath || (sourcePath == entryPath && page.id == homePageID) else { return }
         if message.name == "lumenPosition", let scroll = params["scroll_y"] as? Double {
             Task { _ = try? await engine.call("position", ["document_id": document.id, "page_id": page.id, "scroll_y": max(0, scroll), "anchor": ""]) }; return
+        }
+        if message.name == "lumenDirty" {
+            guard params["document_id"] as? String == document.id, params["page_id"] as? String == page.id, params["expected_version"] as? Int == document.version else { return }
+            if status.textColor != .systemOrange { status.stringValue = "有未保存修改 · \(page.title) · v\(document.version)" }; return
         }
         guard message.name == "lumenSave",
               params["document_id"] as? String == document.id,
@@ -551,7 +587,7 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
     private func updateMetadataState() {
         versionLabel.stringValue = selectedDocument.map { "当前版本 v\($0.version) · \($0.pageCount) 页" + (notesDirty ? " · 有草稿" : "") } ?? "尚未选择知识"
     }
-    private func updateDocumentUI() {
+    func updateDocumentUI() {
         captureMetadataDraft()
         bindingMetadata = true; defer { bindingMetadata = false }
         let document = selectedDocument
@@ -570,6 +606,12 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
         notesDirty = document.flatMap { metadataDrafts[$0.id] } != nil; updateMetadataState()
         sourceLabel.stringValue = document?.sourcePaths.joined(separator: "\n") ?? "尚未选择来源"
         for control in [titleField, projectField, tagsField, versionPopup, favoriteButton] as [NSControl] { control.isEnabled = document != nil }
+        for control in [copyAIButton, moreButton, infoButton, locationButton] { control.isEnabled = document != nil }
+        copyAIButton.isEnabled = document != nil && document?.trashed != true
+        saveButton.isEnabled = document != nil && !viewingHistorical && document?.trashed != true
+        editButton.isEnabled = saveButton.isEnabled
+        for control in [titleField, projectField, tagsField, favoriteButton] as [NSControl] { control.isEnabled = saveButton.isEnabled }
+        notes.isEditable = saveButton.isEnabled
     }
     @objc func revealSource() {
         guard let path = selectedDocument?.primarySource else { showError(EngineFailure("source_missing", "这份知识没有登记原始来源。")); return }
@@ -594,6 +636,7 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
     }
     func applyMetadata(_ params: JSON, id: String) async {
         guard let before = selectedDocument, before.id == id else { return }
+        metadataWriteTicket += 1; let ticket=metadataWriteTicket
         captureMetadataDraft()
         var request = params; request["document_id"] = id
         if request["expected_version"] == nil { request["expected_version"] = before.version }
@@ -618,9 +661,10 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
                     if updated.version != before.version { await open(documentID: id, pageID: selectedPage?.id) }
                 }
             }
-            await refresh(); status.stringValue = notesDirty ? "笔记与信息有未保存的修改，草稿已保留" : "笔记与信息已保存"
+            await refresh(updateStatus:false)
+            if ticket == metadataWriteTicket { status.textColor = .secondaryLabelColor; status.stringValue = notesDirty ? "笔记与信息有未保存的修改，草稿已保留" : "笔记与信息已保存" }
         } catch {
-            captureMetadataDraft(); showError(error)
+            captureMetadataDraft(); guard ticket == metadataWriteTicket else { return }; showError(error)
             if (error as? EngineFailure)?.code == "conflict", metadataDrafts[id] != nil { status.stringValue = "笔记与信息已在其他窗口修改。你的草稿仍保留，可查看已保存信息后再决定。" }
         }
     }
@@ -663,6 +707,7 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
             guard selectedDocument?.id == document.id else { return }
             versions = result["versions"] as? [JSON] ?? []; versionPopup.removeAllItems()
             for version in versions { versionPopup.addItem(withTitle: "v\(version["version"] as? Int ?? 0) · \(version["reason"] as? String ?? "保存")") }
+            if let index = versions.firstIndex(where: { $0["version"] as? Int == document.version }) { versionPopup.selectItem(at:index) }
         } catch { showError(error) }
     }
     @objc func restoreVersion() {
@@ -671,7 +716,9 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
     }
     func restore(version: Int, document: KnowledgeDocument) async {
         do {
-            _ = try await engine.call("restore", ["document_id": document.id, "version": version, "expected_version": document.version])
+            guard try await prepareSavedAction(documentIDs:[document.id],purpose:"恢复历史版本") else { return }
+            let current = try await engine.call("get", ["document_id":document.id])
+            _ = try await engine.call("restore", ["document_id": document.id, "version": version, "expected_version": (current["document"] as? JSON)?["version"] as? Int ?? document.version])
             await open(documentID: document.id); await refresh(); status.stringValue = "已从 v\(version) 恢复为新版本，历史仍然保留"
         } catch { showError(error) }
     }
@@ -718,7 +765,20 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
     func importURL(_ url: URL) async {
         progress.startAnimation(nil); status.stringValue = "正在收录 HTML 与关联资源…"
         do {
-            let result = try await engine.call(url.pathExtension.lowercased() == "pptx" ? "convert" : "import", url.pathExtension.lowercased() == "pptx" ? ["source": url.path, "kind": "ppt"] : ["path": url.path, "include_test": false])
+            var params: JSON = ["path":url.path,"include_test":false]
+            if url.pathExtension.lowercased() != "pptx" {
+                let path = url.hasDirectoryPath ? url.appendingPathComponent("index.html").path : url.path
+                let existing = (try await engine.call("find-source", ["path":path]))["documents"] as? [JSON] ?? []
+                if let first = existing.first, NSApp.activationPolicy() != .prohibited, let window {
+                    let alert = NSAlert(); alert.messageText = "这份来源已经收录"; alert.informativeText = "\(first["title"] as? String ?? "文档") · v\(first["version"] as? Int ?? 1)\n打开已有版本会保留库中修改；更新会建立新版本，旧版本仍保留。"
+                    alert.addButton(withTitle:"打开已有"); alert.addButton(withTitle:"更新已有"); alert.addButton(withTitle:"创建独立副本"); alert.addButton(withTitle:"取消")
+                    let response = await alert.beginSheetModal(for:window)
+                    if response == NSApplication.ModalResponse(rawValue:1003) { progress.stopAnimation(nil); return }
+                    if response == .alertSecondButtonReturn { params["on_duplicate"] = "update"; params["expected_version"] = first["version"] }
+                    if response == .alertThirdButtonReturn { params["on_duplicate"] = "copy" }
+                }
+            }
+            let result = try await engine.call(url.pathExtension.lowercased() == "pptx" ? "convert" : "import", url.pathExtension.lowercased() == "pptx" ? ["source": url.path, "kind": "ppt"] : params)
             await refresh(); if let value = result["document"] as? JSON, let id = value["id"] as? String { await open(documentID: id) }
             let validation = result["validation"] as? JSON ?? [:], warnings = validation["warnings"] as? [JSON] ?? []
             if validation["ok"] as? Bool == false || !warnings.isEmpty {
@@ -747,12 +807,37 @@ final class LibraryWindowController: NSWindowController, NSWindowDelegate, NSTab
         }
     }
     func exportSelected() {
-        guard let document = selectedDocument else { return }
-        let panel = NSSavePanel(); panel.canCreateDirectories = true; panel.nameFieldStringValue = document.title + ".zip"
-        panel.beginSheetModal(for: window!) { [weak self] response in
-            guard response == .OK, let url = panel.url, let self else { return }
-            Task { do { _ = try await self.engine.call("export", ["document_id": document.id, "output": url.path]); self.status.stringValue = "成果已导出，包含完整关联资源" } catch { self.showError(error) } }
+        showExportOptions()
+    }
+
+    func prepareSavedAction(documentIDs: [String], purpose: String) async throws -> Bool {
+        guard let document = selectedDocument, documentIDs.contains(document.id), !viewingHistorical else { return true }
+        try captureMetadataDraft(throwOnFailure:true)
+        let bodyDirty = (try? await reader.evaluateJavaScript("Boolean(window.LumenReader && window.LumenReader.hasUnsavedChanges)")) as? Bool ?? false
+        guard bodyDirty || notesDirty else { return true }
+        guard NSApp.activationPolicy() != .prohibited, let window else { throw EngineFailure("unsaved_changes", "\(purpose)前有未保存修改，操作已停止。") }
+        let alert = NSAlert(); alert.messageText = "还有未保存的修改"; alert.informativeText = "\(purpose)使用已保存版本。保存失败会停止后续操作；取消会保留当前编辑。"
+        alert.addButton(withTitle:"保存后继续"); alert.addButton(withTitle:"使用已保存版本"); alert.addButton(withTitle:"取消")
+        let response = await alert.beginSheetModal(for:window)
+        if response == .alertThirdButtonReturn { return false }
+        if response == .alertFirstButtonReturn {
+            if bodyDirty {
+                guard let payload = try await reader.callAsyncJavaScript("return window.LumenReader.snapshot()",arguments:[:],in:nil,contentWorld:.page) as? JSON else { throw EngineFailure("save_missing", "当前页面没有返回保存内容") }
+                let result = try await engine.call("save",payload)
+                _ = try await reader.callAsyncJavaScript("return window.LumenReader.saved(result)",arguments:["result":result],in:nil,contentWorld:.page)
+            }
+            if let draft = metadataDrafts[document.id] {
+                let latest = try await engine.call("get",["document_id":document.id])
+                var params = draftParams(draft); params["document_id"] = document.id; params["expected_version"] = (latest["document"] as? JSON)?["version"]
+                _ = try await engine.call("metadata",params)
+            }
+        } else {
+            _ = try await reader.evaluateJavaScript("window.LumenReader && window.LumenReader.discardDraft()")
         }
+        try writeDraft(nil,id:document.id); metadataDrafts[document.id] = nil; metadataBaseline = nil
+        bindingMetadata = true; titleField.stringValue = document.title; projectField.stringValue = document.project; tagsField.stringValue = document.tags.joined(separator:", "); notes.string = document.notes; bindingMetadata = false
+        await open(documentID:document.id,pageID:selectedPage?.id); await refresh()
+        return true
     }
     func showGenerateSheet() {
         Task {

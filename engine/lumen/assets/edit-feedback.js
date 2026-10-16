@@ -108,7 +108,12 @@
     ui.querySelector('.hf-panel > p').textContent = label('feedback_help', '选择正文或图片添加意见，保存后可交给 agent 继续处理。');
     const panel = ui.querySelector('.hf-panel'), cards = ui.querySelector('.hf-cards'), savedStatus = ui.querySelector('.hf-saved');
     savedStatus.textContent = label('reading_status', '阅读模式');
-    let active = null, selection = '', editing = false, busy = false, pendingPayload = null;
+    let active = null, selection = '', editing = false, busy = false, pendingPayload = null, locallyChanged = usingDraft;
+    const feedbackMark = () => JSON.stringify({global:state.global,comments:state.comments,round:state.round});
+    let feedbackBaseline = feedbackMark();
+    const mediaMark = () => JSON.stringify([...document.querySelectorAll('img,video,source')].filter(e=>!e.closest('#html-feedback-ui')).map(e=>[e.tagName,e.getAttribute('src'),e.getAttribute('srcset'),e.getAttribute('poster')]));
+    let mediaBaseline = mediaMark();
+    document.addEventListener('input', e => { if (!e.target.closest?.('#html-feedback-ui')) locallyChanged = true; });
     const collect = () => {
       for (const [id,b] of blocks) state.blocks[id] = {id, kind:b.el.tagName.toLowerCase(), editable:b.editable,
         original_text:b.original, text:plainText(b.el), changed:plainText(b.el) !== b.original,
@@ -118,6 +123,7 @@
     };
     const draft = () => {
       collect();
+      window.webkit?.messageHandlers?.lumenDirty?.postMessage({document_id:init.document_id,page_id:init.page_id,expected_version:init.version,dirty:true});
       try { localStorage.setItem(draftKey, JSON.stringify(state)); savedStatus.textContent = label('draft_saved', '草稿已保留 · 保存后写入知识库'); }
       catch (_) { savedStatus.textContent = label('draft_unavailable', '草稿存储不可用，请保存或下载修改稿'); }
     };
@@ -194,6 +200,8 @@
       }
       try { localStorage.removeItem(draftKey); } catch (_) {}
       busy = false; pendingPayload = null; savedStatus.textContent = label('committed', '已保存到知识库');
+      for (const b of blocks.values()) b.initial = plainText(b.el);
+      locallyChanged = false; usingDraft = false; feedbackBaseline = feedbackMark(); mediaBaseline = mediaMark();
       window.dispatchEvent(new CustomEvent('lumen-reader-saved', {detail:value}));
     };
     const save = () => {
@@ -289,6 +297,8 @@
     render();
     window.AnnotateFeedback.page={snapshot:feedbackSnapshot,saveHtml,pageId:init.page_id};
     window.LumenReader={snapshot,patches,save,saved,setEditing,addComment,feedback:feedbackSnapshot,pageId:init.page_id,
+      get hasUnsavedChanges(){return locallyChanged || feedbackMark()!==feedbackBaseline || mediaMark()!==mediaBaseline || [...blocks.values()].some(b=>plainText(b.el)!==b.initial);},
+      discardDraft:()=>{localStorage.removeItem(draftKey);locallyChanged=false;usingDraft=false;},
       get pendingSave(){return pendingPayload;},getPendingSave:()=>pendingPayload};
     window.dispatchEvent(new CustomEvent('lumen-reader-ready'));
   };
